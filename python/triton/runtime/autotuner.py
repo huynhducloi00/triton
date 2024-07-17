@@ -6,6 +6,7 @@ import time
 import inspect
 from typing import Dict
 
+from tqdm.notebook import tqdm
 from ..testing import do_bench, do_bench_cudagraph
 from .jit import KernelInterface
 from .errors import OutOfResources
@@ -136,7 +137,8 @@ class Autotuner(KernelInterface):
 
     def run(self, *args, **kwargs):
         self.nargs = dict(zip(self.arg_names, args))
-        used_cached_result = True
+        brute_force_autotune = False
+        timings={}
         if len(self.configs) > 1:
             all_args = {**self.nargs, **kwargs}
             _args = []
@@ -150,12 +152,14 @@ class Autotuner(KernelInterface):
             key = tuple(key)
             if key not in self.cache:
                 # prune configs
-                used_cached_result = False
+                brute_force_autotune = True
                 pruned_configs = self.prune_configs(kwargs)
                 bench_start = time.time()
-                timings = {config: self._bench(*args, config=config, **kwargs) for config in pruned_configs}
+                for config in tqdm(pruned_configs):
+                    timings[config]=self._bench(*args, config=config, **kwargs)
                 bench_end = time.time()
                 self.bench_time = bench_end - bench_start
+                print(f"bench time {self.bench_time:.2f} time: {[f'{y[0]:.2f}' for x,y in timings.items()]}")
                 self.cache[key] = builtins.min(timings, key=timings.get)
                 self.pre_hook(args, reset_only=True)
                 self.configs_timings = timings
@@ -163,9 +167,10 @@ class Autotuner(KernelInterface):
         else:
             config = self.configs[0]
         self.best_config = config
-        if os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1" and not used_cached_result:
-            print(f"Triton autotuning for function {self.base_fn.__name__} finished after "
-                  f"{self.bench_time:.2f}s; best config selected: {self.best_config};")
+        if os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1" and brute_force_autotune:
+            timing_info=f'COST {timings[self.best_config][0]:.2f} ms'
+            print(f"brute_force_autotune: {brute_force_autotune}. Triton autotuning for function {self.base_fn.__name__} finished after "
+                  f"{self.bench_time:.2f}s; best config selected: {self.best_config}, {timing_info};")
         if config.pre_hook is not None:
             config.pre_hook({**self.nargs, **kwargs, **config.all_kwargs()})
         ret = self.fn.run(

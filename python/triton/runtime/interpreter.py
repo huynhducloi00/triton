@@ -31,6 +31,11 @@ class TensorHandle:
     def __bool__(self):
         return bool(self.data.all())
 
+    def reveal(self):
+        if self.dtype==tl.float8e5:
+            return _convert_float(self.data, self.dtype, tl.float16, None).view(np.float16)
+        return None
+    
     def get_element_ty(self):
         dtype = self.dtype
         while hasattr(dtype, "element_ty"):
@@ -909,6 +914,8 @@ def _patch_reduce_scan():
     tl.core.reduce = _new_reduce
     tl.core.associative_scan = _new_scan
 
+def create_new_tensor(sample_my_tensor, new_data_numpy):
+    return tl.core.tensor(TensorHandle(new_data_numpy, sample_my_tensor.handle.dtype), sample_my_tensor.dtype.scalar)
 
 def _patch_lang_core(lang):
 
@@ -961,6 +968,15 @@ def _patch_lang_core(lang):
             start, end = arg1, arg2
         return range(start, end, step)
 
+    def _new_zeros(shape, dtype):
+        return tl.full(shape, 0, dtype)
+
+    def _new_max(input, axis=None, return_indices=False, return_indices_tie_break_left=True, keep_dims=False):
+        return ReduceOps(axis, tl.standard._elementwise_max, keep_dims=keep_dims).apply(input)
+
+    def _new_sum(input, axis=None, keep_dims=False):
+        return ReduceOps(axis, tl.standard._sum_combine, keep_dims).apply(input)
+
     def _new_static_assert(cond, msg=""):
         assert cond, msg
 
@@ -984,7 +1000,9 @@ def _patch_lang_core(lang):
     lang.multiple_of = partial(_set_attr, name="tt.divisiblity")
     lang.max_contiguous = partial(_set_attr, name="tt.contiguity")
     lang.max_constancy = partial(_set_attr, name="tt.constancy")
-
+    lang.zeros=_new_zeros
+    lang.max=_new_max
+    lang.sum=_new_sum
     _patch_reduce_scan()
 
 
@@ -1085,14 +1103,15 @@ class GridExecutor:
         assert len(grid) <= 3, "grid must have at most 3 dimensions"
         grid = grid + (1, ) * (3 - len(grid))
         interpreter_builder.set_grid_dim(*grid)
-        try:
-            for x in range(grid[0]):
-                for y in range(grid[1]):
-                    for z in range(grid[2]):
-                        interpreter_builder.set_grid_idx(x, y, z)
-                        self.fn(**args)
-        except Exception as e:
-            raise InterpreterError(repr(e)) from e
+        # We really don't want to hide the error
+        # try:
+        for x in range(grid[0]):
+            for y in range(grid[1]):
+                for z in range(grid[2]):
+                    interpreter_builder.set_grid_idx(x, y, z)
+                    self.fn(**args)
+        # except Exception as e:
+        #     raise InterpreterError(repr(e)) from e
         # copy arguments back to propagate side-effects
         self._restore_args_dev(args_dev, args_hst, kwargs, kwargs_hst)
 
@@ -1223,8 +1242,8 @@ class InterpretedFunction:
     def __call__(self, *args, **kwargs):
         # This is a device function call
         _patch_lang(self.fn)
-        fn = self.rewrite()
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            raise InterpreterError(repr(e)) from e
+        # do not need to swallow the error
+        # try:
+        return self.fn(*args, **kwargs)
+        # except Exception as e:
+        #     raise InterpreterError(repr(e)) from e
